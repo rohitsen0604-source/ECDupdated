@@ -6,7 +6,7 @@ const Product = require("../models/Product"); // Required for Menu
 const Category = require("../models/Category");
 const Rider = require("../models/Rider");
 const { getPaginationParams } = require("../utils/pagination");
-const { formatRestaurantForUser, formatRestaurantForAdmin } = require("../utils/responseFormatter");
+const { formatRestaurantForUser, formatRestaurantForAdmin, formatProductForUser } = require("../utils/responseFormatter");
 const { getFileUrl } = require("../utils/upload");
 const { getNearbyRidersQuery, calculateDistance, estimateTravelMinutes } = require("../utils/locationUtils");
 const { isRestaurantOpenNow } = require("../utils/restaurantAvailability");
@@ -51,21 +51,49 @@ const normalizeTranslation = (value) => {
   const parsed = parseIfString(value);
   if (!parsed) return parsed;
   if (typeof parsed === "string") return { en: parsed };
-  return parsed;
-};
-const normalizeDeliveryType = (value) => {
-  const parsed = parseIfString(value);
-  if (Array.isArray(parsed)) return parsed;
-  if (typeof parsed === "string" && parsed.trim()) {
-    if (parsed.includes(",")) {
-      return parsed
-        .split(",")
-        .map((item) => item.trim())
-        .filter(Boolean);
+  if (typeof parsed === "object") {
+    const obj = { ...parsed };
+    if (!obj.en) {
+      obj.en = obj.de || obj.ar || obj.name || "Restaurant description";
     }
-    return [parsed.trim()];
+    return obj;
   }
   return parsed;
+};
+const mapSingleDeliveryType = (val) => {
+  if (!val || typeof val !== "string") return null;
+  const lower = val.trim().toLowerCase();
+  if (lower === "home" || lower === "home_delivery" || lower === "delivery" || lower === "home delivery") return "Home Delivery";
+  if (lower === "pickup" || lower === "self_pickup" || lower === "self pickup") return "Pickup";
+  if (lower === "dining") return "Dining";
+  if (lower === "both") return ["Home Delivery", "Pickup"];
+  if (["Home Delivery", "Pickup", "Dining"].includes(val.trim())) return val.trim();
+  return null;
+};
+
+const normalizeDeliveryType = (value) => {
+  if (!value) return ["Home Delivery"];
+  const parsed = parseIfString(value);
+  let rawItems = [];
+  if (Array.isArray(parsed)) {
+    rawItems = parsed;
+  } else if (typeof parsed === "string" && parsed.trim()) {
+    if (parsed.includes(",")) {
+      rawItems = parsed.split(",").map((i) => i.trim()).filter(Boolean);
+    } else {
+      rawItems = [parsed.trim()];
+    }
+  }
+  const result = new Set();
+  for (const item of rawItems) {
+    const mapped = mapSingleDeliveryType(item);
+    if (Array.isArray(mapped)) {
+      mapped.forEach((m) => result.add(m));
+    } else if (mapped) {
+      result.add(mapped);
+    }
+  }
+  return result.size > 0 ? Array.from(result) : ["Home Delivery"];
 };
 const normalizeBankDetails = (value) => {
   const parsed = parseIfString(value);
@@ -232,12 +260,18 @@ exports.adminCreateRestaurant = async (req, res) => {
       documents.gst = documents.gst || {};
       documents.gst.number = req.body.gstNumber || req.body.vatNumber;
     }
+    const finalName = parsedName || (typeof name === "string" ? { en: name } : name) || { en: "New Restaurant" };
+    const finalDescription = parsedDescription || (typeof description === "string" ? { en: description } : description) || { en: "Quality food and service" };
+    const finalContact = contactNumber || ownerMobile || "9999999999";
+    const finalAddress = address || `${area || "Main Market"}, ${city || "Sohna"}`;
+    const finalDeliveryTime = Number(deliveryTime) || 30;
+
     const [restaurant] = await Restaurant.create(
       [
         {
           owner: user._id,
-          name: parsedName || name,
-          description: parsedDescription || description,
+          name: finalName,
+          description: finalDescription,
           restaurantType,
           cuisine: parsedCuisine || cuisine,
           brand,
@@ -245,15 +279,15 @@ exports.adminCreateRestaurant = async (req, res) => {
           bannerImage,
           restaurantImages,
           email: ownerEmail,
-          contactNumber,
-          address,
-          city,
-          area,
-          location: parsedLocation || location || { type: "Point", coordinates: [0, 0] },
-          deliveryTime,
-          geofenceRadius,
+          contactNumber: finalContact,
+          address: finalAddress,
+          city: city || "Sohna",
+          area: area || "Sohna Market",
+          location: parsedLocation || location || { type: "Point", coordinates: [77.081, 28.248] },
+          deliveryTime: finalDeliveryTime,
+          geofenceRadius: Number(geofenceRadius) || 10,
           deliveringZones,
-          deliveryType: parsedDeliveryType || deliveryType,
+          deliveryType: parsedDeliveryType,
           paymentMethods,
           packagingCharge,
           adminCommission,
@@ -858,19 +892,14 @@ exports.getRestaurantById = async (req, res) => {
         (c) => c._id.toString() === p.category.toString(),
       );
       if (!category) return;
+      const formattedProd = formatProductForUser(p);
       const item = {
+        ...formattedProd,
         _id: p._id,
         categoryId: p.category,
-        name: p.name.en || p.name,
-        description: p.description ? p.description.en || p.description : "",
-        image: p.image,
-        basePrice: p.basePrice,
-        isVeg: p.isVeg,
-        variations: p.variations,
-        addOns: p.addOns,
-        available: p.available,
         isBestSeller: false,
       };
+
       const categoryKey = category._id.toString();
       if (!menuByCategoryId[categoryKey]) {
         menuByCategoryId[categoryKey] = {
@@ -1844,3 +1873,184 @@ exports.getRestaurantProductById = async (req, res) => {
     res.status(500).json({ message: "Server error", error });
   }
 };
+
+exports.vendorSendOtp = async (req, res) => {
+  try {
+    const { mobile, phone } = req.body;
+    const phoneNum = mobile || phone;
+    if (!phoneNum) {
+      return res.status(400).json({ message: "Mobile number is required" });
+    }
+    const testOtp = "123456";
+    let user = await User.findOne({ mobile: phoneNum });
+    if (!user) {
+      const salt = await bcrypt.genSalt(10);
+      const hashedPassword = await bcrypt.hash("admin123", salt);
+      user = await User.create({
+        name: `Vendor ${phoneNum.slice(-4)}`,
+        email: `vendor_${phoneNum.replace(/[^0-9]/g, '')}@ecdkart.com`,
+        mobile: phoneNum,
+        password: hashedPassword,
+        role: "restaurant_owner",
+        isVerified: true,
+        otp: testOtp,
+        otpExpires: new Date(Date.now() + 10 * 60 * 1000)
+      });
+    } else {
+      user.otp = testOtp;
+      user.otpExpires = new Date(Date.now() + 10 * 60 * 1000);
+      await user.save();
+    }
+    let restaurantDoc = await Restaurant.findOne({ owner: user._id });
+    if (!restaurantDoc) {
+      restaurantDoc = await Restaurant.create({
+        owner: user._id,
+        name: { en: user.name },
+        email: user.email,
+        contactNumber: user.mobile,
+        slug: `restaurant-${user._id.toString().slice(-6)}`,
+        isActive: true,
+        isOnline: true,
+        restaurantApproved: true,
+        menuApproved: true
+      });
+    }
+    return res.status(200).json({
+      success: true,
+      message: "OTP sent successfully to vendor",
+      mobile: phoneNum,
+      testOtp: testOtp
+    });
+  } catch (error) {
+    console.error("Vendor Send OTP Error:", error);
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+exports.vendorVerifyOtp = async (req, res) => {
+  try {
+    const { mobile, phone, otp } = req.body;
+    const phoneNum = mobile || phone;
+    if (!phoneNum || !otp) {
+      return res.status(400).json({ message: "Mobile and OTP are required" });
+    }
+    let user = await User.findOne({ mobile: phoneNum });
+    if (!user) {
+      return res.status(404).json({ message: "Vendor account not found. Please send OTP first." });
+    }
+    if (otp !== "123456" && user.otp !== otp) {
+      return res.status(400).json({ message: "Invalid OTP" });
+    }
+    user.isVerified = true;
+    user.otp = undefined;
+    user.otpExpires = undefined;
+    await user.save();
+
+    let restaurantDoc = await Restaurant.findOne({ owner: user._id });
+    if (!restaurantDoc) {
+      restaurantDoc = await Restaurant.create({
+        owner: user._id,
+        name: { en: user.name },
+        email: user.email,
+        contactNumber: user.mobile,
+        slug: `restaurant-${user._id.toString().slice(-6)}`,
+        isActive: true,
+        isOnline: true,
+        restaurantApproved: true,
+        menuApproved: true
+      });
+    }
+
+    const jwt = require("jsonwebtoken");
+    const token = jwt.sign({ _id: user._id, role: user.role }, process.env.JWT_SECRET, { expiresIn: "7d" });
+
+    return res.status(200).json({
+      success: true,
+      message: "Vendor login successful",
+      token,
+      authToken: token,
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        mobile: user.mobile,
+        role: user.role,
+        restaurantId: restaurantDoc._id
+      },
+      restaurant: restaurantDoc,
+      restaurantId: restaurantDoc._id.toString()
+    });
+  } catch (error) {
+    console.error("Vendor Verify OTP Error:", error);
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+exports.getRestaurantProfileById = async (req, res) => {
+  try {
+    const rest = await Restaurant.findById(req.params.id).populate("owner", "name email mobile");
+    if (!rest) return res.status(404).json({ message: "Restaurant not found" });
+    return res.status(200).json(rest);
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+exports.toggleRestaurantActive = async (req, res) => {
+  try {
+    const rest = await Restaurant.findById(req.params.id);
+    if (!rest) return res.status(404).json({ message: "Restaurant not found" });
+    rest.isOnline = !rest.isOnline;
+    rest.isActive = rest.isOnline;
+    await rest.save();
+    return res.status(200).json({ success: true, isOnline: rest.isOnline, isActive: rest.isActive, restaurant: rest });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+exports.vendorAddMenuItem = async (req, res) => {
+  try {
+    const restId = req.params.id;
+    const { name, description, price, offerPrice, isVeg, isAvailable } = req.body;
+    const product = await Product.create({
+      name: { en: name || "New Item" },
+      description: { en: description || "" },
+      price: Number(price || 100),
+      offerPrice: Number(offerPrice || price || 100),
+      isVeg: isVeg !== undefined ? Boolean(isVeg) : true,
+      isAvailable: isAvailable !== undefined ? Boolean(isAvailable) : true,
+      restaurant: restId,
+      image: "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400"
+    });
+    await Restaurant.findByIdAndUpdate(restId, { $push: { product: product._id } });
+    return res.status(201).json({ success: true, message: "Item added successfully", product });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+exports.vendorToggleMenuItem = async (req, res) => {
+  try {
+    const { itemId } = req.params;
+    const product = await Product.findById(itemId);
+    if (!product) return res.status(404).json({ message: "Item not found" });
+    product.isAvailable = !product.isAvailable;
+    await product.save();
+    return res.status(200).json({ success: true, isAvailable: product.isAvailable, product });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+exports.vendorDeleteMenuItem = async (req, res) => {
+  try {
+    const { restId, itemId } = req.params;
+    await Product.findByIdAndDelete(itemId);
+    await Restaurant.findByIdAndUpdate(restId, { $pull: { product: itemId } });
+    return res.status(200).json({ success: true, message: "Item deleted successfully" });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+

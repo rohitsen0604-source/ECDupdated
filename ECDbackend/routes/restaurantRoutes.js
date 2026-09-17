@@ -32,7 +32,14 @@ const {
   getAllApprovedRestaurantsForAdmin,
   getRestaurantProductById,
   getRestaurantByIdAdmin,
-  getRestaurantWalletEarnings
+  getRestaurantWalletEarnings,
+  vendorSendOtp,
+  vendorVerifyOtp,
+  getRestaurantProfileById,
+  toggleRestaurantActive,
+  vendorAddMenuItem,
+  vendorToggleMenuItem,
+  vendorDeleteMenuItem
 } = require('../controllers/restaurantController');
 const {
   createOwnerPromocode,
@@ -42,6 +49,15 @@ const {
   deleteOwnerPromocode
 } = require('../controllers/promocodeController');
 router.get('/', getAllRestaurants);
+router.get('/list', getAllRestaurants);
+router.post('/send-otp', vendorSendOtp);
+router.post('/verify-otp', vendorVerifyOtp);
+router.get('/profile', protect, restaurantOwner, getMyRestaurant);
+router.get('/:id/profile', protect, getRestaurantProfileById);
+router.put('/:id/toggle-active', protect, toggleRestaurantActive);
+router.post('/vendor/menu/add/:id', protect, vendorAddMenuItem);
+router.patch('/vendor/menu/toggle/:restId/:itemId', protect, vendorToggleMenuItem);
+router.post('/:restId/menu/:itemId/request-delete', protect, vendorDeleteMenuItem);
 router.get('/:id/details', protect, getRestaurantProductById);
 router.post('/apply', protect, upload.fields([
   { name: 'image', maxCount: 1 },
@@ -118,7 +134,9 @@ router.get('/admin/listName', protect, admin, getAllRestaurantsNameForAdmin);
 router.get('/admin/list/active', protect, admin, getActiveRestaurantsForAdmin);
 router.put('/admin/verify/:id', protect, admin, verifyRestaurantDocuments);
 router.get('/admin/:id', protect, admin, getRestaurantByIdAdmin);
+router.get('/details/:id', getRestaurantById);
 router.get('/:id', getRestaurantById);
 router.post('/:id/favorite', protect, toggleFavorite);
 router.delete('/:id', protect, admin, deleteRestaurant);
 module.exports = router;
+
